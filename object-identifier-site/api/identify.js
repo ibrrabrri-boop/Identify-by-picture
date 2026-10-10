@@ -1,7 +1,7 @@
-// Vercel serverless function: receives an image, asks Claude what it is, returns JSON.
-// Needs the environment variable ANTHROPIC_API_KEY (set in the Vercel dashboard).
+// Vercel serverless function: receives an image, asks Google Gemini what it is, and returns JSON.
+// Needs the environment variable GEMINI_API_KEY (set in the Vercel dashboard).
 
-const MODEL = process.env.CLAUDE_MODEL || 'claude-haiku-5-5';
+const MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
 const MAX_BASE64_CHARS = 4 * 1024 * 1024;          // ~3 MB of image data
 const ALLOWED = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
 const LIMIT = 10, WINDOW_MS = 10 * 60 * 1000;      // 10 requests / 10 min / IP (best effort)
@@ -26,7 +26,7 @@ module.exports = async function handler(req, res) {
     res.setHeader('Allow', 'POST');
     return res.status(405).json({ error: 'Method not allowed.' });
   }
-  if (!process.env.ANTHROPIC_API_KEY) {
+  if (!process.env.GEMINI_API_KEY) {
     return res.status(500).json({ error: 'Server is not configured yet (missing API key).' });
   }
 
@@ -39,39 +39,49 @@ module.exports = async function handler(req, res) {
   }
 
   try {
-    const r = await fetch('https://api.anthropic.com/v1/messages', {
+    const url = 'https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(MODEL) + ':generateContent';
+    const r = await fetch(url, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
-        'x-api-key': process.env.ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01'
+        'x-goog-api-key': process.env.GEMINI_API_KEY
       },
       body: JSON.stringify({
-        model: MODEL,
-        max_tokens: 700,
-        messages: [{
+        contents: [{
           role: 'user',
-          content: [
-            { type: 'image', source: { type: 'base64', media_type: mediaType, data: image } },
-            { type: 'text', text: PROMPT }
+          parts: [
+            { inline_data: { mime_type: mediaType, data: image } },
+            { text: PROMPT }
           ]
-        }]
+        }],
+        generationConfig: {
+          responseMimeType: 'application/json',
+          maxOutputTokens: 2048,
+          temperature: 0.2
+        }
       })
     });
 
+    if (r.status === 429) {
+      return res.status(429).json({ error: 'The free AI quota is used up for now. Please try again later.' });
+    }
     if (!r.ok) {
-      console.error('Anthropic API error', r.status, await r.text());
+      console.error('Gemini API error', r.status, await r.text());
       return res.status(502).json({ error: 'The AI service had a problem. Please try again.' });
     }
 
     const data = await r.json();
-    const text = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
+    const parts = (data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts) || [];
+    const text = parts.map(p => p.text || '').join('');
+    if (!text) {
+      return res.status(422).json({ error: 'The AI could not describe that image. Try a different one.' });
+    }
     const start = text.indexOf('{'), end = text.lastIndexOf('}');
     if (start < 0 || end < start) throw new Error('No JSON in reply');
-    const result = JSON.parse(text.slice(start, end + 1));
-    return res.status(200).json(result);
+    return res.status(200).json(JSON.parse(text.slice(start, end + 1)));
   } catch (err) {
     console.error(err);
     return res.status(500).json({ error: 'Could not read the AI response. Please try again.' });
   }
 };
+
