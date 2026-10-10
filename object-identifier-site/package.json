@@ -1,0 +1,7 @@
+{
+  "name": "object-identifier",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Upload a photo and identify the object with AI",
+  "engines": { "node": ">=18" }
+}
